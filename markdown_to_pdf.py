@@ -5,6 +5,30 @@ from ibm_watsonx_orchestrate.agent_builder.tools import tool
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 
+def sanitize_text(text: str) -> str:
+    """Sanitize text to prevent rendering issues with special characters.
+    
+    Replaces various dash and special characters that may render as black squares
+    with standard ASCII equivalents.
+    """
+    # Replace various types of dashes with standard hyphen
+    text = text.replace('—', '-')  # Em dash
+    text = text.replace('–', '-')  # En dash
+    text = text.replace('−', '-')  # Minus sign
+    text = text.replace('‐', '-')  # Hyphen (Unicode)
+    text = text.replace('‑', '-')  # Non-breaking hyphen
+    text = text.replace('‒', '-')  # Figure dash
+    text = text.replace('―', '-')  # Horizontal bar
+    
+    # Replace smart quotes with standard quotes
+    text = text.replace('"', '"').replace('"', '"')
+    text = text.replace(''', "'").replace(''', "'")
+    
+    # Replace ellipsis
+    text = text.replace('…', '...')
+    
+    return text
+
 @tool
 def create_pdf_from_text(title: str, content: str) -> bytes:
     """Creates a PDF file from markdown-formatted text and returns it as bytes.
@@ -21,9 +45,9 @@ def create_pdf_from_text(title: str, content: str) -> bytes:
     pdf = canvas.Canvas(buffer, pagesize=letter)
     width, height = letter
 
-    # Add the title
+    # Add the title (sanitize to prevent black squares)
     pdf.setFont("Helvetica-Bold", 18)
-    pdf.drawCentredString(width / 2, height - 80, title)
+    pdf.drawCentredString(width / 2, height - 80, sanitize_text(title))
 
     # Process markdown content
     y_position = height - 120
@@ -71,10 +95,13 @@ def create_pdf_from_text(title: str, content: str) -> bytes:
                 
                 # Draw table header
                 pdf.setFont("Helvetica-Bold", 10)
-                for col_idx, cell in enumerate(header):
-                    x_pos = left_margin + (col_idx * col_width)
-                    pdf.rect(x_pos, y_position - 12, col_width, 15)
-                    # Wrap text if needed - inline wrapping for header
+                
+                # First pass: calculate header height based on wrapped content
+                header_wrapped = []
+                max_header_lines = 1
+                for cell in header:
+                    # Sanitize text to prevent black squares
+                    cell = sanitize_text(cell)
                     words = cell.split()
                     wrapped_lines = []
                     current_line = []
@@ -88,11 +115,60 @@ def create_pdf_from_text(title: str, content: str) -> bytes:
                             current_line = [word]
                     if current_line:
                         wrapped_lines.append(' '.join(current_line))
-                    
-                    for wrap_idx, wrap_line in enumerate(wrapped_lines if wrapped_lines else [cell]):
-                        pdf.drawString(x_pos + 2, y_position - 10 - (wrap_idx * 10), wrap_line)
+                    header_wrapped.append(wrapped_lines if wrapped_lines else [cell])
+                    max_header_lines = max(max_header_lines, len(header_wrapped[-1]))
                 
-                y_position -= 15
+                # Calculate dynamic header height
+                header_height = max_header_lines * 10 + 5
+                
+                # Draw header cells with dynamic height
+                for col_idx, wrapped_lines in enumerate(header_wrapped):
+                    x_pos = left_margin + (col_idx * col_width)
+                    pdf.rect(x_pos, y_position - header_height + 3, col_width, header_height)
+                    
+                    for wrap_idx, wrap_line in enumerate(wrapped_lines):
+                        # Handle inline formatting in header cells
+                        current_x = x_pos + 2
+                        j = 0
+                        while j < len(wrap_line):
+                            if wrap_line[j:j+2] == '**':
+                                end = wrap_line.find('**', j + 2)
+                                if end != -1:
+                                    pdf.setFont("Helvetica-Bold", 10)
+                                    chunk = wrap_line[j+2:end]
+                                    pdf.drawString(current_x, y_position - 10 - (wrap_idx * 10), chunk)
+                                    current_x += pdf.stringWidth(chunk, "Helvetica-Bold", 10)
+                                    j = end + 2
+                                    continue
+                            if wrap_line[j] == '*':
+                                end = wrap_line.find('*', j + 1)
+                                if end != -1:
+                                    pdf.setFont("Helvetica-Oblique", 10)
+                                    chunk = wrap_line[j+1:end]
+                                    pdf.drawString(current_x, y_position - 10 - (wrap_idx * 10), chunk)
+                                    current_x += pdf.stringWidth(chunk, "Helvetica-Oblique", 10)
+                                    j = end + 1
+                                    continue
+                            if wrap_line[j] == '`':
+                                end = wrap_line.find('`', j + 1)
+                                if end != -1:
+                                    pdf.setFont("Courier", 10)
+                                    chunk = wrap_line[j+1:end]
+                                    pdf.drawString(current_x, y_position - 10 - (wrap_idx * 10), chunk)
+                                    current_x += pdf.stringWidth(chunk, "Courier", 10)
+                                    j = end + 1
+                                    continue
+                            k = j
+                            while k < len(wrap_line) and wrap_line[k] not in ['*', '`']:
+                                k += 1
+                            if k > j:
+                                pdf.setFont("Helvetica-Bold", 10)
+                                chunk = wrap_line[j:k]
+                                pdf.drawString(current_x, y_position - 10 - (wrap_idx * 10), chunk)
+                                current_x += pdf.stringWidth(chunk, "Helvetica-Bold", 10)
+                            j = k if k > j else j + 1
+                
+                y_position -= header_height
                 
                 # Draw data rows
                 pdf.setFont("Helvetica", 10)
@@ -101,13 +177,14 @@ def create_pdf_from_text(title: str, content: str) -> bytes:
                         pdf.showPage()
                         y_position = height - 72
                     
-                    row_height = 12
+                    # First pass: calculate row height based on wrapped content
+                    row_wrapped = []
+                    max_row_lines = 1
                     for col_idx, cell in enumerate(row):
                         if col_idx >= num_cols:
                             break
-                        x_pos = left_margin + (col_idx * col_width)
-                        pdf.rect(x_pos, y_position - row_height, col_width, row_height + 3)
-                        # Wrap text if needed - inline wrapping for data
+                        # Sanitize text to prevent black squares
+                        cell = sanitize_text(cell)
                         words = cell.split()
                         wrapped_lines = []
                         current_line = []
@@ -121,18 +198,107 @@ def create_pdf_from_text(title: str, content: str) -> bytes:
                                 current_line = [word]
                         if current_line:
                             wrapped_lines.append(' '.join(current_line))
-                        
-                        for wrap_idx, wrap_line in enumerate(wrapped_lines if wrapped_lines else [cell]):
-                            pdf.drawString(x_pos + 2, y_position - 10 - (wrap_idx * 10), wrap_line)
+                        row_wrapped.append(wrapped_lines if wrapped_lines else [cell])
+                        max_row_lines = max(max_row_lines, len(row_wrapped[-1]))
                     
-                    y_position -= row_height + 3
+                    # Calculate dynamic row height
+                    row_height = max_row_lines * 10 + 5
+                    
+                    # Draw row cells with dynamic height
+                    for col_idx, wrapped_lines in enumerate(row_wrapped):
+                        x_pos = left_margin + (col_idx * col_width)
+                        pdf.rect(x_pos, y_position - row_height + 3, col_width, row_height)
+                        
+                        for wrap_idx, wrap_line in enumerate(wrapped_lines):
+                            # Handle inline formatting in data cells
+                            current_x = x_pos + 2
+                            j = 0
+                            while j < len(wrap_line):
+                                if wrap_line[j:j+2] == '**':
+                                    end = wrap_line.find('**', j + 2)
+                                    if end != -1:
+                                        pdf.setFont("Helvetica-Bold", 10)
+                                        chunk = wrap_line[j+2:end]
+                                        pdf.drawString(current_x, y_position - 10 - (wrap_idx * 10), chunk)
+                                        current_x += pdf.stringWidth(chunk, "Helvetica-Bold", 10)
+                                        j = end + 2
+                                        continue
+                                if wrap_line[j] == '*':
+                                    end = wrap_line.find('*', j + 1)
+                                    if end != -1:
+                                        pdf.setFont("Helvetica-Oblique", 10)
+                                        chunk = wrap_line[j+1:end]
+                                        pdf.drawString(current_x, y_position - 10 - (wrap_idx * 10), chunk)
+                                        current_x += pdf.stringWidth(chunk, "Helvetica-Oblique", 10)
+                                        j = end + 1
+                                        continue
+                                if wrap_line[j] == '`':
+                                    end = wrap_line.find('`', j + 1)
+                                    if end != -1:
+                                        pdf.setFont("Courier", 10)
+                                        chunk = wrap_line[j+1:end]
+                                        pdf.drawString(current_x, y_position - 10 - (wrap_idx * 10), chunk)
+                                        current_x += pdf.stringWidth(chunk, "Courier", 10)
+                                        j = end + 1
+                                        continue
+                                k = j
+                                while k < len(wrap_line) and wrap_line[k] not in ['*', '`']:
+                                    k += 1
+                                if k > j:
+                                    pdf.setFont("Helvetica", 10)
+                                    chunk = wrap_line[j:k]
+                                    pdf.drawString(current_x, y_position - 10 - (wrap_idx * 10), chunk)
+                                    current_x += pdf.stringWidth(chunk, "Helvetica", 10)
+                                j = k if k > j else j + 1
+                    
+                    y_position -= row_height
                 
                 y_position -= line_height
             continue
         
+        # Handle horizontal rules (---, ___, ***)
+        if re.match(r'^[-_*]{3,}$', stripped):
+            if y_position < 72:
+                pdf.showPage()
+                y_position = height - 72
+            pdf.setLineWidth(1)
+            pdf.line(left_margin, y_position, right_margin, y_position)
+            y_position -= line_height
+            i += 1
+            continue
+        
+        # Handle block quotes (>)
+        if stripped.startswith('> '):
+            text = sanitize_text(stripped[2:])
+            # Wrap text inline with indentation
+            words = text.split()
+            wrapped_lines = []
+            current_line = []
+            indent_width = 20
+            for word in words:
+                test_line = ' '.join(current_line + [word])
+                if pdf.stringWidth(test_line, "Helvetica-Oblique", 11) <= max_width - indent_width:
+                    current_line.append(word)
+                else:
+                    if current_line:
+                        wrapped_lines.append(' '.join(current_line))
+                    current_line = [word]
+            if current_line:
+                wrapped_lines.append(' '.join(current_line))
+            
+            for wrap_line in (wrapped_lines if wrapped_lines else [text]):
+                if y_position < 72:
+                    pdf.showPage()
+                    y_position = height - 72
+                pdf.setFont("Helvetica-Oblique", 11)
+                pdf.drawString(left_margin + indent_width, y_position, wrap_line)
+                y_position -= line_height
+            i += 1
+            continue
+        
         # Handle headers with wrapping
         if stripped.startswith('### '):
-            text = stripped[4:]
+            text = sanitize_text(stripped[4:])
             # Wrap text inline
             words = text.split()
             wrapped_lines = []
@@ -157,7 +323,7 @@ def create_pdf_from_text(title: str, content: str) -> bytes:
                 y_position -= line_height
                 
         elif stripped.startswith('## '):
-            text = stripped[3:]
+            text = sanitize_text(stripped[3:])
             # Wrap text inline
             words = text.split()
             wrapped_lines = []
@@ -182,7 +348,7 @@ def create_pdf_from_text(title: str, content: str) -> bytes:
                 y_position -= line_height + 2
                 
         elif stripped.startswith('# '):
-            text = stripped[2:]
+            text = sanitize_text(stripped[2:])
             # Wrap text inline
             words = text.split()
             wrapped_lines = []
@@ -208,7 +374,7 @@ def create_pdf_from_text(title: str, content: str) -> bytes:
         
         # Handle bullet lists with wrapping
         elif stripped.startswith('- ') or stripped.startswith('* '):
-            text = stripped[2:]
+            text = sanitize_text(stripped[2:])
             # Wrap text inline
             words = text.split()
             wrapped_lines = []
@@ -280,7 +446,7 @@ def create_pdf_from_text(title: str, content: str) -> bytes:
             match = re.match(r'^(\d+\.)\s(.+)', stripped)
             if match:
                 number = match.group(1)
-                text = match.group(2)
+                text = sanitize_text(match.group(2))
                 # Wrap text inline
                 words = text.split()
                 wrapped_lines = []
@@ -353,7 +519,8 @@ def create_pdf_from_text(title: str, content: str) -> bytes:
         
         # Regular paragraph with inline formatting and wrapping
         else:
-            # Wrap text inline
+            # Sanitize and wrap text inline
+            stripped = sanitize_text(stripped)
             words = stripped.split()
             wrapped_lines = []
             current_line = []
